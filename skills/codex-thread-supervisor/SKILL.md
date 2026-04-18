@@ -53,7 +53,7 @@ rtk node /home/ubuntulxc/codex-thread-supervisor/supervisor.mjs attach-current \
   --transport ws \
   --ws-url ws://127.0.0.1:9234 \
   --every-minutes 10 \
-  --prompt "Continue the work if there is a clear next step. Otherwise give one short status update and stop."
+  --prompt "Continue the work if there is a clear next step. If the current ticket or workstream is finished, check the relevant remaining tickets and start the most pertinent next one you can advance autonomously. If no relevant non-blocked ticket remains but there is a concrete, non-duplicate next step worth tracking, create the new GitHub ticket first, then continue on it. Otherwise give one short status update and stop."
 ```
 
 4. Report back:
@@ -108,7 +108,7 @@ Prefer a short supervision prompt that does one of these:
 
 Good default:
 
-`Continue the work if there is a clear next step. Otherwise give one short status update and stop.`
+`Continue the work if there is a clear next step. If the current ticket or workstream is finished, check the relevant remaining tickets and start the most pertinent next one you can advance autonomously. If no relevant non-blocked ticket remains but there is a concrete, non-duplicate next step worth tracking, create the new GitHub ticket first, then continue on it. Otherwise give one short status update and stop.`
 
 ## Notes
 

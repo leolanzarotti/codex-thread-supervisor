@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Thread Supervisor"
+  short_description: "Attach recurring supervision to a Codex conversation"
+  default_prompt: "Use $codex-thread-supervisor to relaunch this Codex conversation every X minutes when it becomes idle."

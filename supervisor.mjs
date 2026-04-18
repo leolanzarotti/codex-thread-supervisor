@@ -41,6 +41,16 @@ function appendJsonl(filePath, payload) {
   fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`);
 }
 
+function safeUnlink(filePath) {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -105,11 +115,13 @@ class JsonRpcClient {
   }
 
   onMessage(message) {
-    appendJsonl(this.eventLogPath, {
-      ts: nowIso(),
-      direction: "in",
-      message,
-    });
+    if (this.eventLogPath) {
+      appendJsonl(this.eventLogPath, {
+        ts: nowIso(),
+        direction: "in",
+        message,
+      });
+    }
     if (Object.prototype.hasOwnProperty.call(message, "id")) {
       const entry = this.pending.get(message.id);
       if (!entry) {
@@ -137,11 +149,13 @@ class JsonRpcClient {
     const id = this.nextId;
     this.nextId += 1;
     const payload = { jsonrpc: "2.0", id, method, params };
-    appendJsonl(this.eventLogPath, {
-      ts: nowIso(),
-      direction: "out",
-      message: payload,
-    });
+    if (this.eventLogPath) {
+      appendJsonl(this.eventLogPath, {
+        ts: nowIso(),
+        direction: "out",
+        message: payload,
+      });
+    }
     const response = new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
     });
@@ -285,7 +299,7 @@ function buildRunOptions(args) {
     pidPath,
     daemonLogPath,
     runId,
-    eventLogPath: path.join(logDir, `${runId}.events.jsonl`),
+    eventLogPath: args["debug-events"] ? path.join(logDir, `${runId}.events.jsonl`) : null,
     summaryLogPath: path.join(logDir, "heartbeats.jsonl"),
     everyMinutes: Number(args["every-minutes"] || 15),
     sms: Boolean(args.sms),
@@ -299,6 +313,11 @@ function buildRunOptions(args) {
     cwd: args.cwd || process.cwd(),
     pollSeconds: Number(args["poll-seconds"] || 30),
     limit: Number(args.limit || 5),
+    debugEvents: Boolean(args["debug-events"]),
+    eventRetentionHours: Number(args["event-retention-hours"] || 6),
+    heartbeatRetentionHours: Number(args["heartbeat-retention-hours"] || 168),
+    daemonLogMaxBytes: Number(args["daemon-log-max-bytes"] || 10 * 1024 * 1024),
+    daemonLogKeepBytes: Number(args["daemon-log-keep-bytes"] || 1024 * 1024),
   };
 }
 
@@ -357,6 +376,105 @@ function createAttachmentFromOptions(options, threadId) {
 
 function printJson(value) {
   console.log(JSON.stringify(value, null, 2));
+}
+
+function compactText(text, maxLength = 240) {
+  if (!text) {
+    return null;
+  }
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 3)}...`;
+}
+
+function compactSummary(summary) {
+  return {
+    ts: summary.ts,
+    runId: summary.runId,
+    startedAt: summary.startedAt,
+    transport: summary.transport,
+    wsUrl: summary.wsUrl,
+    status: summary.status,
+    error: summary.error || null,
+    threadId: summary.result?.threadId || null,
+    turnId: summary.result?.turnId || null,
+    beforeTurnCount: summary.result?.beforeTurnCount ?? null,
+    afterTurnCount: summary.result?.afterTurnCount ?? null,
+    assistantMessage: compactText(summary.result?.assistantMessages?.[0] || null),
+    durationMs: summary.result?.completed?.params?.turn?.durationMs ?? null,
+    smsCode: summary.sms?.code ?? null,
+    smsStdout: compactText(summary.sms?.stdout || null, 120),
+  };
+}
+
+function cleanupOldFilesBySuffix(dirPath, suffix, maxAgeMs) {
+  if (!fs.existsSync(dirPath)) {
+    return;
+  }
+  const cutoff = nowMs() - maxAgeMs;
+  for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(suffix)) {
+      continue;
+    }
+    const filePath = path.join(dirPath, entry.name);
+    const stats = fs.statSync(filePath);
+    if (stats.mtimeMs < cutoff) {
+      fs.unlinkSync(filePath);
+    }
+  }
+}
+
+function trimJsonlByAge(filePath, maxAgeMs, transformEntry = null) {
+  if (!fs.existsSync(filePath)) {
+    return;
+  }
+  const cutoff = nowMs() - maxAgeMs;
+  const keptLines = [];
+  for (const line of fs.readFileSync(filePath, "utf8").split("\n")) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(line);
+      const ts = parsed.ts ? Date.parse(parsed.ts) : NaN;
+      if (!Number.isNaN(ts) && ts >= cutoff) {
+        const transformed = transformEntry ? transformEntry(parsed) : parsed;
+        keptLines.push(JSON.stringify(transformed));
+      }
+    } catch {
+      keptLines.push(line);
+    }
+  }
+  fs.writeFileSync(filePath, keptLines.length > 0 ? `${keptLines.join("\n")}\n` : "");
+}
+
+function trimDaemonLog(filePath, maxBytes, keepBytes) {
+  if (!fs.existsSync(filePath)) {
+    return;
+  }
+  const stats = fs.statSync(filePath);
+  if (stats.size <= maxBytes) {
+    return;
+  }
+  const content = fs.readFileSync(filePath);
+  const sliceStart = Math.max(0, content.length - keepBytes);
+  fs.writeFileSync(filePath, content.subarray(sliceStart));
+}
+
+function cleanupLogs(options) {
+  cleanupOldFilesBySuffix(
+    options.logDir,
+    ".events.jsonl",
+    options.eventRetentionHours * 60 * 60 * 1000,
+  );
+  trimJsonlByAge(
+    options.summaryLogPath,
+    options.heartbeatRetentionHours * 60 * 60 * 1000,
+    compactSummary,
+  );
+  trimDaemonLog(
+    options.daemonLogPath,
+    options.daemonLogMaxBytes,
+    options.daemonLogKeepBytes,
+  );
 }
 
 function runSqliteQueryJson(dbPath, sql) {
@@ -510,6 +628,7 @@ function buildSmsText(result) {
 }
 
 async function executeSingleRun(options) {
+  cleanupLogs(options);
   const transport = buildTransport(options);
   const client = new JsonRpcClient(transport, options.eventLogPath);
   const startedAt = nowIso();
@@ -533,7 +652,7 @@ async function executeSingleRun(options) {
       sms,
       status: "ok",
     };
-    appendJsonl(options.summaryLogPath, summary);
+    appendJsonl(options.summaryLogPath, compactSummary(summary));
     return summary;
   } catch (error) {
     const summary = {
@@ -545,10 +664,13 @@ async function executeSingleRun(options) {
       status: "error",
       error: error.message,
     };
-    appendJsonl(options.summaryLogPath, summary);
+    appendJsonl(options.summaryLogPath, compactSummary(summary));
     return summary;
   } finally {
     await client.close();
+    if (!options.debugEvents && options.eventLogPath) {
+      safeUnlink(options.eventLogPath);
+    }
   }
 }
 
@@ -568,10 +690,12 @@ async function loopSingleThread(options) {
     const runOptions = {
       ...options,
       runId: `${isoForFile()}-${crypto.randomBytes(3).toString("hex")}`,
-      eventLogPath: path.join(
-        options.logDir,
-        `${isoForFile()}-${crypto.randomBytes(3).toString("hex")}.events.jsonl`,
-      ),
+      eventLogPath: options.debugEvents
+        ? path.join(
+            options.logDir,
+            `${isoForFile()}-${crypto.randomBytes(3).toString("hex")}.events.jsonl`,
+          )
+        : null,
     };
     await runOnce(runOptions);
     await sleep(options.everyMinutes * 60 * 1000);
@@ -661,12 +785,13 @@ async function runAttachmentOnce(options, attachment) {
     sms: attachment.sms,
     smsScript: attachment.smsScript || options.smsScript,
     runId,
-    eventLogPath: path.join(options.logDir, `${runId}.events.jsonl`),
+    eventLogPath: options.debugEvents ? path.join(options.logDir, `${runId}.events.jsonl`) : null,
   };
   return executeSingleRun(runOptions);
 }
 
 async function tickAttachments(options) {
+  cleanupLogs(options);
   const state = loadState(options.statePath);
   const due = state.attachments.filter(
     (entry) => entry.enabled !== false && new Date(entry.nextRunAt).getTime() <= nowMs(),
@@ -704,6 +829,17 @@ async function tickAttachments(options) {
     status: "tick_complete",
     processed: results.length,
     results,
+  });
+}
+
+function cleanupCommand(options) {
+  cleanupLogs(options);
+  printJson({
+    status: "cleanup_complete",
+    logDir: options.logDir,
+    summaryLogPath: options.summaryLogPath,
+    eventRetentionHours: options.eventRetentionHours,
+    heartbeatRetentionHours: options.heartbeatRetentionHours,
   });
 }
 
@@ -856,6 +992,9 @@ async function main() {
       return;
     case "tick":
       await tickAttachments(options);
+      return;
+    case "cleanup":
+      cleanupCommand(options);
       return;
     case "daemon":
       await daemon(options);

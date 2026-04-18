@@ -34,6 +34,12 @@ Its goal is simple:
 - The background daemon PID is stored in `run/daemon.pid`
 - Logs go to `logs/`
 
+Default logging policy:
+
+- compact `heartbeats.jsonl`
+- no detailed `events.jsonl` unless debug is explicitly enabled
+- short retention for detailed logs
+
 These paths are intentionally ignored by git.
 
 ## Expected Commands
@@ -55,6 +61,8 @@ Common commands:
 - `attach` / `attach-current` must auto-start the daemon if needed
 - `detach` must auto-stop the daemon if there are no remaining attachments
 - The default supervision prompt should stay short and conservative
+- The default supervision prompt may tell the supervised thread to pick the most pertinent remaining ticket when the current ticket is done
+- The default supervision prompt may also tell the supervised thread to create a new concrete, non-duplicate GitHub ticket when no relevant non-blocked ticket remains
 - If there is no clear next step, the supervised turn should produce one short status update and stop
 
 ## Safety Rules

@@ -21,6 +21,21 @@ Prototype minimal pour superviser un thread Codex existant via `codex app-server
 - `supervisor.mjs`: client `app-server` + boucle de supervision
 - `logs/`: heartbeats et resultats d'execution
 
+## Logging
+
+Par defaut, le projet ecrit des logs compacts:
+
+- `heartbeats.jsonl`: resume compact des runs
+- `daemon.log`: log texte du daemon
+
+Les `*.events.jsonl` detailles sont desactives par defaut et ne sont crees qu'avec `--debug-events`.
+
+Retention par defaut:
+
+- `events.jsonl`: `6h`
+- `heartbeats.jsonl`: `7j`
+- `daemon.log`: tronque automatiquement au-dela de `10 MB`
+
 ## Usage
 
 Test local one-shot via `stdio`:
@@ -77,7 +92,7 @@ node supervisor.mjs attach-current \
   --transport ws \
   --ws-url ws://127.0.0.1:9234 \
   --every-minutes 10 \
-  --prompt "Continue the work if there is a clear next step. Otherwise give one short status update and stop."
+  --prompt "Continue the work if there is a clear next step. If the current ticket or workstream is finished, check the relevant remaining tickets and start the most pertinent next one you can advance autonomously. If no relevant non-blocked ticket remains but there is a concrete, non-duplicate next step worth tracking, create the new GitHub ticket first, then continue on it. Otherwise give one short status update and stop."
 ```
 
 Lister les supervisions enregistrees:
@@ -90,6 +105,8 @@ Comportement automatique:
 
 - `attach` et `attach-current` demarrent automatiquement le daemon si besoin
 - `detach` arrete automatiquement le daemon si c'etait la derniere supervision active
+- le prompt peut explicitement demander de basculer vers le ticket pertinent suivant quand le ticket courant est termine
+- le prompt peut aussi demander de creer un nouveau ticket GitHub pertinent quand il n'y a plus de ticket non bloque a avancer, a condition d'eviter les doublons
 
 Demarrer le daemon local:
 
@@ -113,6 +130,12 @@ Executer un tick manuel sur toutes les supervisions:
 
 ```bash
 node supervisor.mjs tick
+```
+
+Executer un cleanup manuel des logs:
+
+```bash
+node supervisor.mjs cleanup
 ```
 
 ## Criteres de verification

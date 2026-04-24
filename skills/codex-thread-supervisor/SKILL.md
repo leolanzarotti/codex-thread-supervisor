@@ -7,7 +7,7 @@ description: "Use when Léo wants to relaunch the current Codex conversation eve
 
 Use this skill when Léo says things like:
 
-- `relance cette conversation toutes les 10 minutes`
+- `relance cette conversation toutes les 1 minute`
 - `supervise ce thread`
 - `assure-toi que le travail continue`
 - `liste mes supervisions Codex`
@@ -34,6 +34,7 @@ The supervisor:
 - posts a real `turn/start` into that thread
 - can send an SMS after completion when requested
 - persists local attachments in the backend repo
+- auto-starts a local loopback `ws://` app-server when the Desktop app-server is not already listening
 
 ## Default workflow
 
@@ -45,15 +46,16 @@ rtk node /home/ubuntulxc/codex-thread-supervisor/supervisor.mjs current-thread -
 
 2. Default to the selected top candidate unless there is a serious ambiguity.
 
-3. Attach supervision with:
+3. Attach supervision with the selected `thread_id`. Default interval is 1 minute.
 
 ```bash
-rtk node /home/ubuntulxc/codex-thread-supervisor/supervisor.mjs attach-current \
+rtk node /home/ubuntulxc/codex-thread-supervisor/supervisor.mjs attach \
   --cwd "$PWD" \
+  --thread-id <THREAD_ID> \
   --transport ws \
   --ws-url ws://127.0.0.1:9234 \
-  --every-minutes 10 \
-  --prompt "Continue the work if there is a clear next step. If the current ticket or workstream is finished, check the relevant remaining tickets and start the most pertinent next one you can advance autonomously. If no relevant non-blocked ticket remains but there is a concrete, non-duplicate next step worth tracking, create the new GitHub ticket first, then continue on it. Otherwise give one short status update and stop."
+  --every-minutes 1 \
+  --prompt "Continue the work if there is a clear next step. If the current ticket or workstream is finished, check the relevant remaining tickets and start the most pertinent next one you can advance autonomously. If no relevant non-blocked ticket remains but there is a concrete, non-duplicate next step worth tracking, create the new GitHub ticket first, then continue on it. If no clear next step remains, stop this supervision by running: rtk node /home/ubuntulxc/codex-thread-supervisor/supervisor.mjs detach --thread-id <THREAD_ID>. After stopping it, give one short status update and stop."
 ```
 
 4. Report back:
@@ -104,15 +106,18 @@ rtk node /home/ubuntulxc/codex-thread-supervisor/supervisor.mjs tick
 Prefer a short supervision prompt that does one of these:
 
 - continue immediately if there is an obvious next action
-- otherwise produce one concise status update and stop
+- if there is no clear next action, detach this supervision first, then produce one concise status update and stop
+
+Do not leave a supervision attached if the supervised thread is only going to repeat "no next step" every minute.
 
 Good default:
 
-`Continue the work if there is a clear next step. If the current ticket or workstream is finished, check the relevant remaining tickets and start the most pertinent next one you can advance autonomously. If no relevant non-blocked ticket remains but there is a concrete, non-duplicate next step worth tracking, create the new GitHub ticket first, then continue on it. Otherwise give one short status update and stop.`
+`Continue the work if there is a clear next step. If the current ticket or workstream is finished, check the relevant remaining tickets and start the most pertinent next one you can advance autonomously. If no relevant non-blocked ticket remains but there is a concrete, non-duplicate next step worth tracking, create the new GitHub ticket first, then continue on it. If no clear next step remains, stop this supervision by running: rtk node /home/ubuntulxc/codex-thread-supervisor/supervisor.mjs detach --thread-id <THREAD_ID>. After stopping it, give one short status update and stop.`
 
 ## Notes
 
 - Do not use `codex exec resume` for this workflow.
-- Prefer `attach-current` for the current conversation.
+- Prefer inferring the current thread first, then using `attach --thread-id` so the prompt can include the concrete detach command.
 - If the user explicitly gives a `thread_id`, use `attach` instead of `attach-current`.
 - If the user asks for SMS, pass `--sms`; the backend already knows the default Free Mobile script path.
+- `--transport ws` is still the default workflow: it reuses the Desktop app-server when present, starts a local loopback app-server when absent, and can fall back to temporary `stdio://` if the local websocket cannot be used.

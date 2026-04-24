@@ -230,29 +230,155 @@ class StdioTransport {
   }
 }
 
+function parseWebSocketUrl(url) {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "ws:") {
+    throw new Error(`Unsupported websocket URL: ${url}`);
+  }
+  return {
+    host: parsed.hostname,
+    port: Number(parsed.port || 80),
+  };
+}
+
+function managedAppServerPaths(options, url) {
+  const { port } = parseWebSocketUrl(url);
+  return {
+    pidPath: path.join(options.runDir, `app-server-${port}.pid`),
+    logPath: path.join(options.logDir, `app-server-${port}.log`),
+  };
+}
+
+function startManagedAppServer(options, url) {
+  const { pidPath, logPath } = managedAppServerPaths(options, url);
+  const existingPid = readPid({ pidPath });
+  if (isPidRunning(existingPid)) {
+    return { status: "already_running", pid: existingPid, pidPath, logPath };
+  }
+  safeUnlink(pidPath);
+
+  const out = fs.openSync(logPath, "a");
+  const err = fs.openSync(logPath, "a");
+  const child = spawn("codex", ["app-server", "--listen", url], {
+    cwd: options.rootDir,
+    detached: true,
+    stdio: ["ignore", out, err],
+    env: process.env,
+  });
+  child.unref();
+  fs.writeFileSync(pidPath, `${child.pid}\n`);
+  return { status: "started", pid: child.pid, pidPath, logPath };
+}
+
+function stopManagedAppServer(options, url) {
+  const { pidPath } = managedAppServerPaths(options, url);
+  const pid = readPid({ pidPath });
+  if (!isPidRunning(pid)) {
+    safeUnlink(pidPath);
+    return { status: "not_running", pidPath, pid };
+  }
+  process.kill(pid, "SIGTERM");
+  safeUnlink(pidPath);
+  return { status: "stopped", pidPath, pid };
+}
+
+function isLoopbackHost(host) {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
 class WebSocketTransport {
-  constructor(url) {
+  constructor(url, options) {
     this.url = url;
+    this.options = options;
     this.ws = null;
+    this.fallback = null;
+    this.startedManagedServer = false;
   }
 
-  async connect(onMessage) {
+  async openSocket(onMessage, timeoutMs = 3000) {
     this.ws = new WebSocket(this.url);
     this.ws.addEventListener("message", (event) => {
       onMessage(JSON.parse(event.data.toString()));
     });
+    let timeout = null;
     await new Promise((resolve, reject) => {
+      timeout = setTimeout(() => {
+        reject(new Error(`Timed out connecting to ${this.url}`));
+      }, timeoutMs);
       this.ws.addEventListener("open", resolve, { once: true });
       this.ws.addEventListener("error", reject, { once: true });
+    }).finally(() => {
+      clearTimeout(timeout);
     });
   }
 
+  async connect(onMessage) {
+    try {
+      await this.openSocket(onMessage);
+      return;
+    } catch (initialError) {
+      try {
+        this.ws?.close();
+      } catch {}
+      const { host } = parseWebSocketUrl(this.url);
+      if (!isLoopbackHost(host)) {
+        throw initialError;
+      }
+
+      const appServer = startManagedAppServer(this.options, this.url);
+      this.startedManagedServer = appServer.status === "started";
+      const deadline = nowMs() + 10000;
+      let lastError = initialError;
+      while (nowMs() < deadline) {
+        try {
+          await sleep(250);
+          await this.openSocket(onMessage, 1000);
+          return;
+        } catch (error) {
+          lastError = error;
+          try {
+            this.ws?.close();
+          } catch {}
+        }
+      }
+
+      this.fallback = new StdioTransport();
+      try {
+        await this.fallback.connect(onMessage);
+      } catch (fallbackError) {
+        if (this.startedManagedServer) {
+          stopManagedAppServer(this.options, this.url);
+          this.startedManagedServer = false;
+        }
+        throw new Error(
+          `Could not connect to ${this.url} (${lastError.message}); stdio fallback also failed: ${fallbackError.message}`,
+        );
+      }
+    }
+  }
+
   send(payload) {
+    if (this.fallback) {
+      this.fallback.send(payload);
+      return;
+    }
     this.ws.send(JSON.stringify(payload));
   }
 
   async close() {
+    if (this.fallback) {
+      await this.fallback.close();
+      if (this.startedManagedServer) {
+        stopManagedAppServer(this.options, this.url);
+        this.startedManagedServer = false;
+      }
+      return;
+    }
     if (!this.ws) {
+      if (this.startedManagedServer) {
+        stopManagedAppServer(this.options, this.url);
+        this.startedManagedServer = false;
+      }
       return;
     }
     this.ws.close();
@@ -260,12 +386,16 @@ class WebSocketTransport {
       this.ws.addEventListener("close", resolve, { once: true });
       setTimeout(resolve, 1000);
     });
+    if (this.startedManagedServer) {
+      stopManagedAppServer(this.options, this.url);
+      this.startedManagedServer = false;
+    }
   }
 }
 
 function buildTransport(options) {
   if (options.transport === "ws") {
-    return new WebSocketTransport(options.wsUrl);
+    return new WebSocketTransport(options.wsUrl, options);
   }
   return new StdioTransport();
 }
@@ -301,7 +431,7 @@ function buildRunOptions(args) {
     runId,
     eventLogPath: args["debug-events"] ? path.join(logDir, `${runId}.events.jsonl`) : null,
     summaryLogPath: path.join(logDir, "heartbeats.jsonl"),
-    everyMinutes: Number(args["every-minutes"] || 15),
+    everyMinutes: Number(args["every-minutes"] || 1),
     sms: Boolean(args.sms),
     smsScript:
       args["sms-script"] ||
@@ -540,6 +670,18 @@ async function runTurn(client, options) {
     threadId: options.threadId,
     includeTurns: true,
   });
+  let resumed = null;
+
+  if (threadStatusType(before) === "notLoaded") {
+    resumed = await client.request("thread/resume", {
+      threadId: options.threadId,
+      persistExtendedHistory: true,
+    });
+    before = await client.request("thread/read", {
+      threadId: options.threadId,
+      includeTurns: true,
+    });
+  }
 
   const idleDeadline = nowMs() + options.idleTimeoutMs;
   while (threadStatusType(before) !== "idle") {
@@ -553,12 +695,24 @@ async function runTurn(client, options) {
       threadId: options.threadId,
       includeTurns: true,
     });
+    if (threadStatusType(before) === "notLoaded" && !resumed) {
+      resumed = await client.request("thread/resume", {
+        threadId: options.threadId,
+        persistExtendedHistory: true,
+      });
+      before = await client.request("thread/read", {
+        threadId: options.threadId,
+        includeTurns: true,
+      });
+    }
   }
 
-  const resumed = await client.request("thread/resume", {
-    threadId: options.threadId,
-    persistExtendedHistory: true,
-  });
+  if (!resumed) {
+    resumed = await client.request("thread/resume", {
+      threadId: options.threadId,
+      persistExtendedHistory: true,
+    });
+  }
 
   const start = await client.request("turn/start", {
     threadId: options.threadId,

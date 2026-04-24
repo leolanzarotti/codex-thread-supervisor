@@ -63,12 +63,13 @@ Common commands:
 - The default supervision prompt should stay short and conservative
 - The default supervision prompt may tell the supervised thread to pick the most pertinent remaining ticket when the current ticket is done
 - The default supervision prompt may also tell the supervised thread to create a new concrete, non-duplicate GitHub ticket when no relevant non-blocked ticket remains
-- If there is no clear next step, the supervised turn should produce one short status update and stop
+- Default supervision interval is 1 minute
+- If there is no clear next step, the supervised turn should detach/stop its own supervision, then produce one short status update and stop
 
 ## Safety Rules
 
 - Do not silently supervise the wrong thread
-- Prefer `attach-current` only when the inferred current thread is clear
+- Prefer inferring the current thread first, then using `attach --thread-id` when the prompt needs the concrete thread id for self-detach
 - Do not force a new turn onto a busy thread
 - Do not hardcode secrets in git
 - Keep SMS optional

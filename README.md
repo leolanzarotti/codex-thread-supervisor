@@ -59,14 +59,19 @@ node supervisor.mjs run-once \
   --log-dir ./logs
 ```
 
-Boucle toutes les 15 minutes:
+Si aucun app-server compatible n'ecoute sur l'URL `ws://` locale, le superviseur
+demarre automatiquement `codex app-server --listen <url>` pour ce run. Si le
+port local est occupe par un serveur non compatible, il bascule sur un
+app-server `stdio://` temporaire.
+
+Boucle toutes les 1 minute:
 
 ```bash
 node supervisor.mjs loop \
   --transport ws \
   --ws-url ws://127.0.0.1:9234 \
   --thread-id 019d9f9d-e340-7410-b1c3-073c39cdfb5d \
-  --every-minutes 15 \
+  --every-minutes 1 \
   --prompt "Check the thread state and answer with a short supervision note." \
   --log-dir ./logs
 ```
@@ -84,15 +89,16 @@ node supervisor.mjs run-once \
   --log-dir ./logs
 ```
 
-Attacher la conversation courante au superviseur:
+Attacher une conversation au superviseur avec son `thread_id`:
 
 ```bash
-node supervisor.mjs attach-current \
+node supervisor.mjs attach \
   --cwd /home/ubuntulxc/leo-codex-workspace \
+  --thread-id 019d9f9d-e340-7410-b1c3-073c39cdfb5d \
   --transport ws \
   --ws-url ws://127.0.0.1:9234 \
-  --every-minutes 10 \
-  --prompt "Continue the work if there is a clear next step. If the current ticket or workstream is finished, check the relevant remaining tickets and start the most pertinent next one you can advance autonomously. If no relevant non-blocked ticket remains but there is a concrete, non-duplicate next step worth tracking, create the new GitHub ticket first, then continue on it. Otherwise give one short status update and stop."
+  --every-minutes 1 \
+  --prompt "Continue the work if there is a clear next step. If the current ticket or workstream is finished, check the relevant remaining tickets and start the most pertinent next one you can advance autonomously. If no relevant non-blocked ticket remains but there is a concrete, non-duplicate next step worth tracking, create the new GitHub ticket first, then continue on it. If no clear next step remains, stop this supervision by running: rtk node /home/ubuntulxc/codex-thread-supervisor/supervisor.mjs detach --thread-id 019d9f9d-e340-7410-b1c3-073c39cdfb5d. After stopping it, give one short status update and stop."
 ```
 
 Lister les supervisions enregistrees:
@@ -107,6 +113,7 @@ Comportement automatique:
 - `detach` arrete automatiquement le daemon si c'etait la derniere supervision active
 - le prompt peut explicitement demander de basculer vers le ticket pertinent suivant quand le ticket courant est termine
 - le prompt peut aussi demander de creer un nouveau ticket GitHub pertinent quand il n'y a plus de ticket non bloque a avancer, a condition d'eviter les doublons
+- si aucun next step clair ne reste, le prompt par defaut doit demander au thread supervise de lancer `detach --thread-id <THREAD_ID>` pour eviter une boucle de statuts vides
 
 Demarrer le daemon local:
 
@@ -149,6 +156,11 @@ node supervisor.mjs cleanup
 Le thread cible doit etre `idle` avant `turn/start`.
 
 Le prototype attend cet etat puis echoue proprement si le thread reste occupe au-dela de `--idle-timeout-ms`.
+
+Quand un app-server froid retourne `notLoaded`, le superviseur appelle d'abord
+`thread/resume`, relit le thread, puis applique la contrainte `idle`. Cela permet
+au mode websocket de fonctionner meme si l'app-server n'a pas ete lance au
+prealable par l'application Desktop distante.
 
 Voir aussi `EXPERIMENTS.md` pour les runs reels et les logs associes.
 

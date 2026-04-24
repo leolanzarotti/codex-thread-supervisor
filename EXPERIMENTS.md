@@ -2,6 +2,25 @@
 
 Runs executed on `2026-04-18`.
 
+Additional validation on `2026-04-24`.
+
+## Current fix
+
+### 4. WebSocket mode without a pre-existing Desktop app-server
+
+- websocket: `ws://127.0.0.1:9234`
+- setup: no `codex app-server` process was running
+- command: `run-once --transport ws` against an intentionally bogus thread id
+- outcome:
+  - supervisor started a local `codex app-server --listen ws://127.0.0.1:9234`
+  - JSON-RPC reached the app-server and failed at the expected protocol layer:
+    `thread not loaded: 00000000-0000-0000-0000-000000000000`
+  - the supervisor-started app-server was stopped during cleanup
+- related implementation change:
+  - `ws` transport now auto-starts a local app-server for loopback URLs when the first connection fails
+  - if the local websocket cannot be used after startup, the run falls back to a temporary `stdio://` app-server
+  - cold `notLoaded` threads are resumed before enforcing the `idle` precondition
+
 ## Proven working paths
 
 ### 1. Existing thread via spawned `stdio` app-server
